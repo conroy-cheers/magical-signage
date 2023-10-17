@@ -1,0 +1,13 @@
+[package]
+edition = "2021"
+name = "dotenv-hex"
+version = "0.1.0"
+license = "MIT"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+dotenvy = "0.15.7"
+quote = "1.0.33"
+syn = "2.0.38"
