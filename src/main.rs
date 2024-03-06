@@ -4,18 +4,20 @@
 #![feature(type_alias_impl_trait)]
 
 use core::cell::RefCell;
-
 use defmt::*;
 use dotenv_hex::fetch_hex_env;
 use embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice;
 use embassy_executor::Spawner;
-use embassy_lora::iv::GenericSx126xInterfaceVariant;
 use embassy_rp::gpio::{Input, Level, Output, Pin, Pull};
-use embassy_rp::peripherals::SPI0;
+use embassy_rp::peripherals::{PIN_25, SPI0};
 use embassy_rp::spi::{Async, Config, Spi};
+use embassy_rp::Peripheral;
 use embassy_sync::blocking_mutex::{CriticalSectionMutex, Mutex};
-use embassy_time::{block_for, Delay, Duration};
+use embassy_time::{block_for, Delay, Duration, Timer};
+use embedded_hal_bus::spi::ExclusiveDevice;
 use epd_waveshare::{epd2in66b::*, prelude::*};
+use graphics::DisplayContent;
+use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lorawan_device::{AppEui, AppKey, DevEui, JoinMode};
 use {defmt_rtt as _, panic_probe as _};
 
@@ -25,9 +27,22 @@ mod lora;
 
 use lora::config_lora;
 
+#[embassy_executor::task]
+async fn blinky_task(led_pin: embassy_rp::PeripheralRef<'static, PIN_25>) {
+    let mut led = Output::new(led_pin, Level::Low);
+    loop {
+        led.set_high();
+        Timer::after(Duration::from_millis(100)).await;
+        led.set_low();
+        Timer::after(Duration::from_millis(100)).await;
+    }
+}
+
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
+
+    unwrap!(spawner.spawn(blinky_task(p.PIN_25.into_ref())));
 
     let spi_mutex: CriticalSectionMutex<RefCell<Spi<SPI0, Async>>>;
     let mut spi_device;
@@ -62,13 +77,18 @@ async fn main(_spawner: Spawner) {
             data_or_command,
             reset,
             &mut Delay,
-            None,
+            Some(100),
         )
         .unwrap();
         e_paper
     };
 
     let mut lora_device = {
+        let nss = Output::new(p.PIN_3.degrade(), Level::High);
+        let reset = Output::new(p.PIN_15.degrade(), Level::High);
+        let dio1 = Input::new(p.PIN_20.degrade(), Pull::None);
+        let busy = Input::new(p.PIN_2.degrade(), Pull::None);
+
         let spi1 = {
             let miso = p.PIN_12;
             let mosi = p.PIN_11;
@@ -83,14 +103,10 @@ async fn main(_spawner: Spawner) {
                 Config::default(),
             )
         };
+        let spi = ExclusiveDevice::new(spi1, nss, Delay);
 
-        let nss = Output::new(p.PIN_3.degrade(), Level::High);
-        let reset = Output::new(p.PIN_15.degrade(), Level::High);
-        let dio1 = Input::new(p.PIN_20.degrade(), Pull::None);
-        let busy = Input::new(p.PIN_2.degrade(), Pull::None);
-
-        let iv = GenericSx126xInterfaceVariant::new(nss, reset, dio1, busy, None, None).unwrap();
-        match config_lora(spi1, iv).await {
+        let iv = GenericSx126xInterfaceVariant::new(reset, dio1, busy, None, None).unwrap();
+        match config_lora(spi, iv).await {
             Ok(device) => device,
             Err(err) => {
                 defmt::error!("Failed to configure LoRA device: {}", err);
@@ -99,7 +115,12 @@ async fn main(_spawner: Spawner) {
         }
     };
 
-    display::display_frame("Connecting...", &mut e_paper, &mut spi_device, &mut Delay);
+    display::display_frame(
+        &DisplayContent::from("", "Connecting...").unwrap(),
+        &mut e_paper,
+        &mut spi_device,
+        &mut Delay,
+    );
 
     let mut recv_buffer: [u8; 32] = [0; 32];
     loop {
@@ -112,35 +133,55 @@ async fn main(_spawner: Spawner) {
             })
             .await
         {
-            Ok(()) => {
-                defmt::info!("LoRaWAN network joined");
-                loop {
-                    match lora_device.send_recv(&[], &mut recv_buffer, 1, true).await {
-                        Ok(sz) => {
-                            defmt::info!("Sent message successfully; received {} bytes", sz);
-                            match &sz {
-                                1 => {
-                                    let text = match &recv_buffer[0] {
-                                        0x00 => "POTATO TOMATO",
-                                        0x01 => "example text 9000",
-                                        _ => "this is a PLACEHOLDER",
-                                    };
-                                    defmt::info!("Displaying text: {}", text);
-                                    display::display_frame(
-                                        &text,
-                                        &mut e_paper,
-                                        &mut spi_device,
-                                        &mut Delay,
-                                    );
+            Ok(response) => {
+                match response {
+                    lorawan_device::async_device::JoinResponse::JoinSuccess => {
+                        defmt::info!("LoRaWAN network joined");
+                        loop {
+                            match lora_device.send(&[], 1, true).await {
+                                Ok(resp) => {
+                                    match resp {
+                                    lorawan_device::async_device::SendResponse::DownlinkReceived(
+                                        sz,
+                                    ) => {
+                                        defmt::info!(
+                                            "Sent message successfully; received {} bytes",
+                                            sz
+                                        );
+                                        match &sz {
+                                            1 => {
+                                                let text = match &recv_buffer[0] {
+                                                    0x00 => "POTATO TOMATO",
+                                                    0x01 => "example text 9000",
+                                                    _ => "this is a PLACEHOLDER",
+                                                };
+                                                defmt::info!("Displaying text: {}", text);
+                                                display::display_frame(
+                                                    &DisplayContent::from(text, "").unwrap(),
+                                                    &mut e_paper,
+                                                    &mut spi_device,
+                                                    &mut Delay,
+                                                );
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    lorawan_device::async_device::SendResponse::SessionExpired => {}
+                                    lorawan_device::async_device::SendResponse::NoAck => {}
+                                    lorawan_device::async_device::SendResponse::RxComplete => {}
                                 }
-                                _ => {}
+
+                                    // Wait politely before resend
+                                    block_for(Duration::from_secs(30));
+                                }
+                                Err(err) => {
+                                    info!("Send error = {}", err);
+                                }
                             }
-                            // Wait politely before resend
-                            block_for(Duration::from_secs(30));
                         }
-                        Err(err) => {
-                            info!("Send error = {}", err);
-                        }
+                    }
+                    lorawan_device::async_device::JoinResponse::NoJoinAccept => {
+                        defmt::error!("LoRaWAN join failed");
                     }
                 }
             }

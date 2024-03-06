@@ -1,12 +1,12 @@
-use embedded_hal_1::delay::DelayUs;
-use embedded_hal_1::digital::{InputPin, OutputPin};
-use embedded_hal_1::spi::SpiDevice;
+use embedded_hal::delay::DelayNs;
+use embedded_hal::digital::{InputPin, OutputPin};
+use embedded_hal::spi::SpiDevice;
 use epd_waveshare::{epd2in66b::*, prelude::*};
 
 use crate::graphics;
 
 pub(crate) fn display_frame<SPI, BUSY, DC, RST, DLY>(
-    text: &str,
+    text: &graphics::DisplayContent,
     e_paper: &mut Epd2in66b<SPI, BUSY, DC, RST, DLY>,
     spi_device: &mut SPI,
     delay: &mut DLY,
@@ -15,7 +15,7 @@ pub(crate) fn display_frame<SPI, BUSY, DC, RST, DLY>(
     BUSY: InputPin,
     DC: OutputPin,
     RST: OutputPin,
-    DLY: DelayUs,
+    DLY: DelayNs,
 {
     let display = graphics::draw(&text);
     e_paper.wake_up(spi_device, delay).unwrap();

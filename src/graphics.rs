@@ -5,8 +5,23 @@ use embedded_graphics::{
     text::{Alignment, Text},
 };
 use epd_waveshare::{epd2in66b::*, prelude::*};
+use heapless::String;
 
-pub(crate) fn draw(text: &str) -> Display2in66b {
+pub(crate) struct DisplayContent {
+    pub main_text: String<32>,
+    pub status_text: String<32>,
+}
+
+impl DisplayContent {
+    pub fn from(main_text: &str, status_text: &str) -> Result<Self, ()> {
+        Ok(Self {
+            main_text: String::try_from(main_text)?,
+            status_text: String::try_from(status_text)?,
+        })
+    }
+}
+
+pub(crate) fn draw(text: &DisplayContent) -> Display2in66b {
     // Create a Display buffer to draw on, specific for this ePaper
     let mut display = Display2in66b::default();
 
@@ -25,18 +40,19 @@ pub(crate) fn draw(text: &str) -> Display2in66b {
         .into_styled(PrimitiveStyle::with_fill(TriColor::White))
         .draw(&mut display);
 
-    // Draw some text on the buffer
+    // Draw main text
+    let main_text_position = display.bounding_box().center() + Point::new(0, -10);
     Text::with_alignment(
-        text,
-        display.bounding_box().center() + Point::new(1, 0),
+        &text.main_text,
+        main_text_position + Point::new(1, 0),
         MonoTextStyle::new(&FONT_10X20, TriColor::Black),
         Alignment::Center,
     )
     .draw(&mut display)
     .unwrap();
     Text::with_alignment(
-        text,
-        display.bounding_box().center() + Point::new(0, 1),
+        &text.main_text,
+        main_text_position + Point::new(0, 1),
         MonoTextStyle::new(&FONT_10X20, TriColor::Chromatic),
         Alignment::Center,
     )
